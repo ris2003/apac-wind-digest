@@ -44,8 +44,8 @@ import requests
 from config import (
     MARKETS, GLOBAL_TRADE_FEEDS, CORE_KEYWORDS, WATCH_ENTITIES,
     VESSEL_CONTRACT_KEYWORDS, LOOKBACK_DAYS, MAX_ARTICLES_PER_MARKET,
-    MIN_RELEVANCE_FOR_DIGEST, MAX_ITEMS_PER_MARKET, MAX_TOP_LINE_ITEMS,
-    TRUSTED_DOMAINS, MARKET_FLAGS,
+    MIN_RELEVANCE_FOR_DIGEST, MAX_ITEMS_PER_MARKET, MIN_ITEMS_PER_MARKET,
+    MAX_TOP_LINE_ITEMS, TRUSTED_DOMAINS, MARKET_FLAGS,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -262,17 +262,36 @@ def is_trusted_source(article: dict) -> bool:
     return any(td in domain or td in link for td in TRUSTED_DOMAINS)
 
 
-def curate(articles: list, limit: int) -> list:
+def curate(articles: list, limit: int, allow_fallback: bool = False, min_items: int = 0) -> list:
     """Apply the relevance bar, drop low-confidence noise, sort by
     relevance then source credibility, and cap to `limit` items — this is
-    what keeps the digest short and high-signal instead of exhaustive."""
+    what keeps the digest short and high-signal instead of exhaustive.
+
+    If allow_fallback=True, guarantees at least `min_items` results as long
+    as `articles` is non-empty — topped up with the next-best-scoring items
+    even if they're below MIN_RELEVANCE_FOR_DIGEST — so a market with real
+    news that week never renders as empty just because everything happened
+    to score as "general market news" rather than "high priority". A market
+    with zero collected articles still renders as empty, as it should.
+    """
     kept = [
         a for a in articles
         if a.get("relevance", 0) >= MIN_RELEVANCE_FOR_DIGEST
         and not (a.get("low_confidence") and a.get("relevance", 0) < 3)
     ]
     kept.sort(key=lambda a: (a.get("relevance", 0), is_trusted_source(a)), reverse=True)
-    return kept[:limit]
+
+    if allow_fallback and len(kept) < min_items and articles:
+        kept_ids = {a["id"] for a in kept}
+        remaining = [a for a in articles if a["id"] not in kept_ids]
+        remaining.sort(key=lambda a: (a.get("relevance", 0), is_trusted_source(a)), reverse=True)
+        needed = min_items - len(kept)
+        for a in remaining[:needed]:
+            a["_below_bar"] = True
+        kept = kept + remaining[:needed]
+        kept.sort(key=lambda a: (a.get("relevance", 0), is_trusted_source(a)), reverse=True)
+
+    return kept[:max(limit, min_items)]
 
 
 # ---------------------------------------------------------------------------
@@ -308,14 +327,15 @@ def build_digest(market_results: dict, global_results: list) -> str:
 
     lines.append("## Market-by-market roundup")
     for market, items in market_results.items():
-        curated = curate(items, MAX_ITEMS_PER_MARKET)
+        curated = curate(items, MAX_ITEMS_PER_MARKET, allow_fallback=True, min_items=MIN_ITEMS_PER_MARKET)
         if not curated:
             continue
         flag = MARKET_FLAGS.get(market, "")
         lines.append(f"### {flag} {market}")
         for a in curated:
             tag = f"`{a.get('theme','Other')}`"
-            lines.append(f"- {tag} {a['english_title']} — {a['summary']} ([source]({a['link']}))")
+            note = " _(below usual bar — shown so this market isn't empty)_" if a.get("_below_bar") else ""
+            lines.append(f"- {tag} {a['english_title']}{note} — {a['summary']} ([source]({a['link']}))")
         lines.append("")
 
     curated_global = curate(global_results, MAX_ITEMS_PER_MARKET)
@@ -349,12 +369,14 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
         flag = MARKET_FLAGS.get(a["market"], "") if show_market else ""
         market_tag = f'{flag} <span style="color:{GOLD};font-weight:bold;">{a["market"]}</span> · ' if show_market else ""
         anchor = ' <span style="color:#a35c1d;">⚓</span>' if is_vessel_contract_item(a) else ""
+        below_bar_note = f'<div style="font-size:11px;color:{MUTED};font-style:italic;margin-top:2px;">Below usual relevance bar — shown so this market isn\'t left empty</div>' if a.get("_below_bar") else ""
         return f"""
         <tr><td style="padding:14px 0;border-bottom:1px solid {BORDER};">
           <div style="font-size:12px;color:{MUTED};margin-bottom:4px;">{market_tag}{a.get('theme','')}</div>
           <div style="font-size:16px;font-weight:bold;color:{TEXT};margin-bottom:4px;">{a['english_title']}{anchor}</div>
           <div style="font-size:14px;color:{TEXT};line-height:1.5;margin-bottom:4px;">{a['summary']}</div>
           <a href="{a['link']}" style="font-size:12px;color:{NAVY};text-decoration:underline;">Read more →</a>
+          {below_bar_note}
         </td></tr>"""
 
     def section_header(title):
@@ -378,7 +400,7 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
             body_rows.append(item_row(a))
 
     for market, items in market_results.items():
-        curated = curate(items, MAX_ITEMS_PER_MARKET)
+        curated = curate(items, MAX_ITEMS_PER_MARKET, allow_fallback=True, min_items=MIN_ITEMS_PER_MARKET)
         if not curated:
             continue
         flag = MARKET_FLAGS.get(market, "")
@@ -472,9 +494,10 @@ def run():
         print(f"Collecting: {market}")
         raw = collect_market_articles(market, cfg)
         filtered = keyword_prefilter(raw, cfg.get("native_keywords", []))
-        print(f"  {len(raw)} raw -> {len(filtered)} after keyword filter")
+        print(f"  {len(raw)} raw -> {len(filtered)} after keyword+date filter")
         classified = [classify_article(a) for a in filtered]
-        classified = [a for a in classified if a.get("relevance", 0) >= 1]
+        scores = [a.get("relevance", 0) for a in classified]
+        print(f"  relevance scores this week: {scores}")
         market_results[market] = classified
         time.sleep(0.5)
 
