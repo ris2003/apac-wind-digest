@@ -143,6 +143,7 @@ LOOKBACK_DAYS = 7
 MAX_ARTICLES_PER_MARKET = 15       # candidates considered before classification
 MIN_RELEVANCE_FOR_DIGEST = 2       # 0-3 scale; raise this to show fewer, higher-bar items
 MAX_ITEMS_PER_MARKET = 4           # cap shown per market section, after classification
+MIN_ITEMS_PER_MARKET = 2           # always show at least this many per market if any news exists at all
 MAX_TOP_LINE_ITEMS = 6             # cap on the "top-line summary" section
 
 # ---------------------------------------------------------------------------
