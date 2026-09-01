@@ -24,6 +24,7 @@ MARKETS = {
         ],
         "gnews_queries": [
             ("offshore wind Taiwan", "en", "TW"),
+            ("Taiwan offshore wind auction", "en", "TW"),
             ("離岸風電", "zh-Hant", "TW"),
         ],
         "native_keywords": ["離岸風電", "風力發電", "安裝船", "風場", "經濟部能源署"],
@@ -31,9 +32,11 @@ MARKETS = {
     "Japan": {
         "feeds": [
             "https://www.japantimes.co.jp/feed/",
+            "https://www3.nhk.or.jp/rss/news/cat5.xml",  # NHK business
         ],
         "gnews_queries": [
             ("offshore wind Japan", "en", "JP"),
+            ("Japan offshore wind auction", "en", "JP"),
             ("洋上風力", "ja", "JP"),
         ],
         "native_keywords": ["洋上風力", "風力発電", "設置船", "経済産業省"],
@@ -44,14 +47,18 @@ MARKETS = {
         ],
         "gnews_queries": [
             ("offshore wind Korea", "en", "KR"),
+            ("Korea offshore wind auction", "en", "KR"),
             ("해상풍력", "ko", "KR"),
         ],
         "native_keywords": ["해상풍력", "설치선", "한국전력"],
     },
     "China": {
-        "feeds": [],
+        "feeds": [
+            "https://www.scmp.com/rss/91/feed",  # SCMP China business
+        ],
         "gnews_queries": [
             ("offshore wind China", "en", "CN"),
+            ("China offshore wind installation vessel", "en", "CN"),
             ("海上风电", "zh-Hans", "CN"),
         ],
         "native_keywords": ["海上风电", "安装船", "风电场"],
@@ -59,6 +66,7 @@ MARKETS = {
     "Vietnam": {
         "feeds": [
             "https://e.vnexpress.net/rss/business.rss",
+            "https://vietnamnews.vn/rss/economy.rss",
         ],
         "gnews_queries": [
             ("offshore wind Vietnam", "en", "VN"),
@@ -69,6 +77,7 @@ MARKETS = {
     "Philippines": {
         "feeds": [
             "https://www.bworldonline.com/feed/",
+            "https://business.inquirer.net/feed",
         ],
         "gnews_queries": [
             ("offshore wind Philippines", "en", "PH"),
@@ -78,9 +87,11 @@ MARKETS = {
     "Australia": {
         "feeds": [
             "https://reneweconomy.com.au/feed/",
+            "https://www.abc.net.au/news/feed/51892/rss.xml",  # ABC business
         ],
         "gnews_queries": [
             ("offshore wind Australia", "en", "AU"),
+            ("Australia offshore wind auction", "en", "AU"),
         ],
         "native_keywords": [],
     },
@@ -96,6 +107,8 @@ GLOBAL_TRADE_FEEDS = [
     "https://www.offshorewind.biz/feed/",
     "https://gcaptain.com/feed/",
     "https://www.windtech-international.com/rss.xml",
+    "https://www.reuters.com/arc/outboundfeeds/v3/rss/category/business/energy/?outputType=xml",
+    "https://www.rigzone.com/news/rss/rigzone_latest.aspx",
 ]
 
 # ---------------------------------------------------------------------------
@@ -142,7 +155,9 @@ MAX_TOP_LINE_ITEMS = 6             # cap on the "top-line summary" section
 TRUSTED_DOMAINS = [
     "reuters.com", "bloomberg.com", "nikkei.com", "japantimes.co.jp",
     "focustaiwan.tw", "taipeitimes.com", "koreaherald.com", "yonhapnews.co.kr",
-    "vnexpress.net", "reneweconomy.com.au", "afr.com",
+    "vnexpress.net", "vietnamnews.vn", "reneweconomy.com.au", "afr.com",
+    "abc.net.au", "scmp.com", "nhk.or.jp", "bworldonline.com",
+    "business.inquirer.net", "rigzone.com",
     "rechargenews.com", "upstreamonline.com", "windpowermonthly.com",
     "offshorewind.biz", "gcaptain.com", "windtech-international.com",
 ]
