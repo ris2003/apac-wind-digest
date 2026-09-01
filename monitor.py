@@ -112,6 +112,16 @@ def normalize_entry(entry, market: str, source_type: str, query: str = None) -> 
     published = getattr(entry, "published", "") or getattr(entry, "updated", "")
     source = getattr(entry, "source", {}).get("title") if hasattr(entry, "source") else None
 
+    # feedparser gives a parsed time.struct_time (UTC) when it can determine
+    # one; we convert to a real datetime so we can filter by LOOKBACK_DAYS.
+    published_dt = None
+    struct = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if struct:
+        try:
+            published_dt = dt.datetime(*struct[:6], tzinfo=dt.timezone.utc)
+        except Exception:
+            published_dt = None
+
     return {
         "id": hashlib.md5((title + link).encode("utf-8")).hexdigest()[:10],
         "market": market,
@@ -119,10 +129,23 @@ def normalize_entry(entry, market: str, source_type: str, query: str = None) -> 
         "link": link,
         "summary_raw": re.sub("<[^<]+?>", "", summary)[:600],
         "published": published,
+        "published_dt": published_dt,
         "source": source or _domain_from_url(link),
         "source_type": source_type,
         "gnews_query": query,
     }
+
+
+def within_lookback_window(article: dict) -> bool:
+    """Keep the article if it's within LOOKBACK_DAYS, OR if the feed didn't
+    provide a parseable date at all (some sources omit it) — we don't want
+    to silently drop everything just because a date field is missing, but
+    anything with a clear date outside the window is excluded."""
+    published_dt = article.get("published_dt")
+    if published_dt is None:
+        return True
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=LOOKBACK_DAYS)
+    return published_dt >= cutoff
 
 
 def _domain_from_url(url: str) -> str:
@@ -148,6 +171,8 @@ def keyword_prefilter(articles: list, native_keywords: list) -> list:
     all_terms = [k.lower() for k in CORE_KEYWORDS + WATCH_ENTITIES] + native_keywords
     kept = []
     for a in articles:
+        if not within_lookback_window(a):
+            continue
         haystack = f"{a['title']} {a['summary_raw']}".lower()
         if any(term.lower() in haystack for term in all_terms):
             kept.append(a)
@@ -308,7 +333,7 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
     inline styles only (no flexbox/grid, no external CSS) because Outlook
     desktop renders email HTML with Word's engine, which ignores most modern
     CSS — tables are the one layout method that reliably works there."""
-    today = dt.date.today().strftime("%Y年%m月%d日")
+    today = dt.date.today().strftime("%B %d, %Y")
     all_items = [a for items in market_results.values() for a in items] + global_results
     top_items = curate(all_items, MAX_TOP_LINE_ITEMS)
     vessel_items = curate([a for a in all_items if is_vessel_contract_item(a)], MAX_TOP_LINE_ITEMS)
@@ -329,7 +354,7 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
           <div style="font-size:12px;color:{MUTED};margin-bottom:4px;">{market_tag}{a.get('theme','')}</div>
           <div style="font-size:16px;font-weight:bold;color:{TEXT};margin-bottom:4px;">{a['english_title']}{anchor}</div>
           <div style="font-size:14px;color:{TEXT};line-height:1.5;margin-bottom:4px;">{a['summary']}</div>
-          <a href="{a['link']}" style="font-size:12px;color:{NAVY};text-decoration:underline;">閱讀原文 →</a>
+          <a href="{a['link']}" style="font-size:12px;color:{NAVY};text-decoration:underline;">Read more →</a>
         </td></tr>"""
 
     def section_header(title):
@@ -340,15 +365,15 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
 
     body_rows = []
 
-    body_rows.append(section_header("本週重點"))
+    body_rows.append(section_header("Top Stories"))
     if top_items:
         for a in top_items:
             body_rows.append(item_row(a))
     else:
-        body_rows.append(f'<tr><td style="padding:14px 0;color:{MUTED};font-size:13px;">本週沒有符合門檻的重點新聞。</td></tr>')
+        body_rows.append(f'<tr><td style="padding:14px 0;color:{MUTED};font-size:13px;">No items met the relevance bar this week.</td></tr>')
 
     if vessel_items:
-        body_rows.append(section_header("⚓ 船舶與合約動態"))
+        body_rows.append(section_header("⚓ Vessel &amp; Contract Watch"))
         for a in vessel_items:
             body_rows.append(item_row(a))
 
@@ -363,7 +388,7 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
 
     curated_global = curate(global_results, MAX_ITEMS_PER_MARKET)
     if curated_global:
-        body_rows.append(section_header("🌏 全球 / 泛亞太產業媒體"))
+        body_rows.append(section_header("🌏 Global / Pan-APAC Trade Press"))
         for a in curated_global:
             body_rows.append(item_row(a, show_market=False))
 
@@ -374,8 +399,8 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
 <tr><td align="center">
 <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid {BORDER};">
 <tr><td style="background:{NAVY};padding:24px 28px;">
-  <div style="font-size:20px;font-weight:bold;color:#ffffff;">APAC 離岸風電週報</div>
-  <div style="font-size:13px;color:{GOLD};margin-top:4px;">{today}</div>
+  <div style="font-size:20px;font-weight:bold;color:#ffffff;">APAC Offshore Wind Weekly</div>
+  <div style="font-size:13px;color:{GOLD};margin-top:4px;">{today} · covering the past {LOOKBACK_DAYS} days</div>
 </td></tr>
 <tr><td style="padding:8px 28px 28px 28px;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -383,7 +408,7 @@ def build_digest_html(market_results: dict, global_results: list) -> str:
   </table>
 </td></tr>
 <tr><td style="padding:16px 28px;background:{BG};border-top:1px solid {BORDER};">
-  <div style="font-size:11px;color:{MUTED};">自動產生 · 資料來源包含產業媒體與各國新聞，內容為 AI 摘要，重要決策請查證原文。</div>
+  <div style="font-size:11px;color:{MUTED};">Auto-generated · sourced from industry trade press and national news outlets · summaries are AI-generated — verify original sources before making decisions.</div>
 </td></tr>
 </table>
 </td></tr>
@@ -409,7 +434,7 @@ def send_email(digest_markdown: str, digest_html: str):
     from email.mime.text import MIMEText
 
     recipients = [r.strip() for r in DIGEST_RECIPIENTS.split(",") if r.strip()]
-    subject = f"APAC 離岸風電週報 — {dt.date.today().isoformat()}"
+    subject = f"APAC Offshore Wind Weekly Digest — {dt.date.today().isoformat()}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
