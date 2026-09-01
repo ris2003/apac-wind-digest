@@ -44,6 +44,8 @@ import requests
 from config import (
     MARKETS, GLOBAL_TRADE_FEEDS, CORE_KEYWORDS, WATCH_ENTITIES,
     VESSEL_CONTRACT_KEYWORDS, LOOKBACK_DAYS, MAX_ARTICLES_PER_MARKET,
+    MIN_RELEVANCE_FOR_DIGEST, MAX_ITEMS_PER_MARKET, MAX_TOP_LINE_ITEMS,
+    TRUSTED_DOMAINS, MARKET_FLAGS,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -229,62 +231,174 @@ def is_vessel_contract_item(article: dict) -> bool:
     return any(k.lower() in haystack for k in VESSEL_CONTRACT_KEYWORDS)
 
 
+def is_trusted_source(article: dict) -> bool:
+    domain = (article.get("source") or "").lower()
+    link = (article.get("link") or "").lower()
+    return any(td in domain or td in link for td in TRUSTED_DOMAINS)
+
+
+def curate(articles: list, limit: int) -> list:
+    """Apply the relevance bar, drop low-confidence noise, sort by
+    relevance then source credibility, and cap to `limit` items — this is
+    what keeps the digest short and high-signal instead of exhaustive."""
+    kept = [
+        a for a in articles
+        if a.get("relevance", 0) >= MIN_RELEVANCE_FOR_DIGEST
+        and not (a.get("low_confidence") and a.get("relevance", 0) < 3)
+    ]
+    kept.sort(key=lambda a: (a.get("relevance", 0), is_trusted_source(a)), reverse=True)
+    return kept[:limit]
+
+
 # ---------------------------------------------------------------------------
 # 4. DIGEST ASSEMBLY
 # ---------------------------------------------------------------------------
 
 def build_digest(market_results: dict, global_results: list) -> str:
+    """Markdown version — used for the saved file and as the plain-text
+    email fallback. Curated to high-signal items only."""
     today = dt.date.today().isoformat()
     lines = [f"# APAC Offshore Wind Weekly Digest — {today}", ""]
 
     all_items = [a for items in market_results.values() for a in items] + global_results
-    top_items = sorted(all_items, key=lambda a: a.get("relevance", 0), reverse=True)[:8]
+    top_items = curate(all_items, MAX_TOP_LINE_ITEMS)
 
     lines.append("## Top-line summary")
     if not top_items:
-        lines.append("_No items met the relevance threshold this week._")
+        lines.append("_No items met the relevance bar this week._")
     for a in top_items:
-        flag = " ⚓" if is_vessel_contract_item(a) else ""
-        lines.append(f"- **[{a['market']}]** {a['english_title']}{flag} — {a['summary']} ([source]({a['link']}))")
+        flag = MARKET_FLAGS.get(a["market"], "")
+        anchor = " ⚓" if is_vessel_contract_item(a) else ""
+        lines.append(f"- {flag} **[{a['market']}]** {a['english_title']}{anchor} — {a['summary']} ([source]({a['link']}))")
     lines.append("")
 
-    vessel_items = [a for a in all_items if is_vessel_contract_item(a)]
+    vessel_items = curate([a for a in all_items if is_vessel_contract_item(a)], MAX_TOP_LINE_ITEMS)
     lines.append("## ⚓ Vessel & contract watch")
     if not vessel_items:
         lines.append("_No vessel/contract items this week._")
     for a in vessel_items:
-        lines.append(f"- **[{a['market']}]** {a['english_title']} — {a['summary']} ([source]({a['link']}))")
+        flag = MARKET_FLAGS.get(a["market"], "")
+        lines.append(f"- {flag} **[{a['market']}]** {a['english_title']} — {a['summary']} ([source]({a['link']}))")
     lines.append("")
 
     lines.append("## Market-by-market roundup")
     for market, items in market_results.items():
-        relevant = [a for a in items if a.get("relevance", 0) >= 1]
-        if not relevant:
+        curated = curate(items, MAX_ITEMS_PER_MARKET)
+        if not curated:
             continue
-        lines.append(f"### {market}")
-        for a in relevant:
+        flag = MARKET_FLAGS.get(market, "")
+        lines.append(f"### {flag} {market}")
+        for a in curated:
             tag = f"`{a.get('theme','Other')}`"
-            conf = " _(low confidence — verify)_" if a.get("low_confidence") else ""
-            lines.append(f"- {tag} {a['english_title']}{conf} — {a['summary']} ([source]({a['link']}))")
+            lines.append(f"- {tag} {a['english_title']} — {a['summary']} ([source]({a['link']}))")
         lines.append("")
 
-    if global_results:
-        lines.append("### Global / pan-APAC trade press")
-        for a in sorted(global_results, key=lambda a: a.get("relevance", 0), reverse=True)[:10]:
+    curated_global = curate(global_results, MAX_ITEMS_PER_MARKET)
+    if curated_global:
+        lines.append("### 🌏 Global / pan-APAC trade press")
+        for a in curated_global:
             lines.append(f"- {a['english_title']} — {a['summary']} ([source]({a['link']}))")
         lines.append("")
 
     return "\n".join(lines)
 
 
+def build_digest_html(market_results: dict, global_results: list) -> str:
+    """News-style HTML version for the email body. Built with tables and
+    inline styles only (no flexbox/grid, no external CSS) because Outlook
+    desktop renders email HTML with Word's engine, which ignores most modern
+    CSS — tables are the one layout method that reliably works there."""
+    today = dt.date.today().strftime("%Y年%m月%d日")
+    all_items = [a for items in market_results.values() for a in items] + global_results
+    top_items = curate(all_items, MAX_TOP_LINE_ITEMS)
+    vessel_items = curate([a for a in all_items if is_vessel_contract_item(a)], MAX_TOP_LINE_ITEMS)
+
+    NAVY = "#1a2b4a"
+    GOLD = "#c9a15a"
+    TEXT = "#2b2b2b"
+    MUTED = "#6b6b6b"
+    BORDER = "#e2e2e2"
+    BG = "#f7f7f5"
+
+    def item_row(a, show_market=True):
+        flag = MARKET_FLAGS.get(a["market"], "") if show_market else ""
+        market_tag = f'{flag} <span style="color:{GOLD};font-weight:bold;">{a["market"]}</span> · ' if show_market else ""
+        anchor = ' <span style="color:#a35c1d;">⚓</span>' if is_vessel_contract_item(a) else ""
+        return f"""
+        <tr><td style="padding:14px 0;border-bottom:1px solid {BORDER};">
+          <div style="font-size:12px;color:{MUTED};margin-bottom:4px;">{market_tag}{a.get('theme','')}</div>
+          <div style="font-size:16px;font-weight:bold;color:{TEXT};margin-bottom:4px;">{a['english_title']}{anchor}</div>
+          <div style="font-size:14px;color:{TEXT};line-height:1.5;margin-bottom:4px;">{a['summary']}</div>
+          <a href="{a['link']}" style="font-size:12px;color:{NAVY};text-decoration:underline;">閱讀原文 →</a>
+        </td></tr>"""
+
+    def section_header(title):
+        return f"""
+        <tr><td style="padding:22px 0 8px 0;border-bottom:2px solid {NAVY};">
+          <span style="font-size:15px;font-weight:bold;color:{NAVY};letter-spacing:0.5px;">{title}</span>
+        </td></tr>"""
+
+    body_rows = []
+
+    body_rows.append(section_header("本週重點"))
+    if top_items:
+        for a in top_items:
+            body_rows.append(item_row(a))
+    else:
+        body_rows.append(f'<tr><td style="padding:14px 0;color:{MUTED};font-size:13px;">本週沒有符合門檻的重點新聞。</td></tr>')
+
+    if vessel_items:
+        body_rows.append(section_header("⚓ 船舶與合約動態"))
+        for a in vessel_items:
+            body_rows.append(item_row(a))
+
+    for market, items in market_results.items():
+        curated = curate(items, MAX_ITEMS_PER_MARKET)
+        if not curated:
+            continue
+        flag = MARKET_FLAGS.get(market, "")
+        body_rows.append(section_header(f"{flag} {market}"))
+        for a in curated:
+            body_rows.append(item_row(a, show_market=False))
+
+    curated_global = curate(global_results, MAX_ITEMS_PER_MARKET)
+    if curated_global:
+        body_rows.append(section_header("🌏 全球 / 泛亞太產業媒體"))
+        for a in curated_global:
+            body_rows.append(item_row(a, show_market=False))
+
+    rows_html = "\n".join(body_rows)
+
+    return f"""
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{BG};padding:24px 0;">
+<tr><td align="center">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid {BORDER};">
+<tr><td style="background:{NAVY};padding:24px 28px;">
+  <div style="font-size:20px;font-weight:bold;color:#ffffff;">APAC 離岸風電週報</div>
+  <div style="font-size:13px;color:{GOLD};margin-top:4px;">{today}</div>
+</td></tr>
+<tr><td style="padding:8px 28px 28px 28px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    {rows_html}
+  </table>
+</td></tr>
+<tr><td style="padding:16px 28px;background:{BG};border-top:1px solid {BORDER};">
+  <div style="font-size:11px;color:{MUTED};">自動產生 · 資料來源包含產業媒體與各國新聞，內容為 AI 摘要，重要決策請查證原文。</div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+"""
+
+
 # ---------------------------------------------------------------------------
 # 4b. EMAIL DELIVERY
 # ---------------------------------------------------------------------------
 
-def send_email(digest_markdown: str):
-    """Emails the digest as both plain text and simple HTML. Silently skips
-    if SMTP settings / recipients aren't configured, so local testing without
-    email setup still works."""
+def send_email(digest_markdown: str, digest_html: str):
+    """Emails the digest as both plain text (markdown) and rich HTML
+    (news-style layout). Silently skips if SMTP settings / recipients
+    aren't configured, so local testing without email setup still works."""
     if not (SMTP_USER and SMTP_PASSWORD and DIGEST_RECIPIENTS):
         print("  [info] Email not configured (SMTP_USER/SMTP_PASSWORD/DIGEST_RECIPIENTS "
               "missing) — skipping send. Digest was still saved to file.")
@@ -295,21 +409,14 @@ def send_email(digest_markdown: str):
     from email.mime.text import MIMEText
 
     recipients = [r.strip() for r in DIGEST_RECIPIENTS.split(",") if r.strip()]
-    subject = f"APAC Offshore Wind Weekly Digest — {dt.date.today().isoformat()}"
-
-    html_body = digest_markdown
-    html_body = re.sub(r"^# (.+)$", r"<h1>\1</h1>", html_body, flags=re.MULTILINE)
-    html_body = re.sub(r"^## (.+)$", r"<h2>\1</h2>", html_body, flags=re.MULTILINE)
-    html_body = re.sub(r"^### (.+)$", r"<h3>\1</h3>", html_body, flags=re.MULTILINE)
-    html_body = re.sub(r"^- (.+)$", r"<p>&bull; \1</p>", html_body, flags=re.MULTILINE)
-    html_body = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', html_body)
+    subject = f"APAC 離岸風電週報 — {dt.date.today().isoformat()}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(digest_markdown, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(MIMEText(digest_html, "html", "utf-8"))
 
     try:
         # Port 465 = implicit SSL (Gmail's default).
@@ -353,13 +460,14 @@ def run():
     global_classified = [a for a in global_classified if a.get("relevance", 0) >= 1]
 
     digest = build_digest(market_results, global_classified)
+    digest_html = build_digest_html(market_results, global_classified)
 
     out_path = f"digest_{dt.date.today().isoformat()}.md"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(digest)
     print(f"\nDigest written to {out_path}")
 
-    send_email(digest)
+    send_email(digest, digest_html)
 
     return out_path
 
